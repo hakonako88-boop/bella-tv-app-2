@@ -1,0 +1,6 @@
+{
+  "appId": "com.hakonako88.bellatv",
+  "appName": "Bella TV",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
