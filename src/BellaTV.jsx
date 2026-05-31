@@ -57,6 +57,46 @@ export async function fetchM3U(url) {
   return r2.text();
 }
 
+export async function fetchXtreamLive({ server, username, password }) {
+  const base = server.trim().replace(/\/$/, "").replace(/\/player_api\.php.*$/i, "");
+  const api = base.endsWith("/player_api.php") ? base : `${base}/player_api.php`;
+  const auth = `username=${encodeURIComponent(username.trim())}&password=${encodeURIComponent(password.trim())}`;
+
+  const [streamsRes, catsRes] = await Promise.all([
+    fetch(`${api}?${auth}&action=get_live_streams`),
+    fetch(`${api}?${auth}&action=get_live_categories`),
+  ]);
+
+  if (!streamsRes.ok) throw new Error(`HTTP ${streamsRes.status}`);
+  const streams = await streamsRes.json();
+  const cats = catsRes.ok ? await catsRes.json() : [];
+  const catMap = new Map((cats || []).map(c => [String(c.category_id), c.category_name || "Xtream"]));
+
+  return (streams || []).map((item, i) => {
+    const ext = (item.container_extension || "ts").replace(/^\./, "");
+    const streamId = item.stream_id ?? i;
+    const url = `${base}/live/${encodeURIComponent(username.trim())}/${encodeURIComponent(password.trim())}/${streamId}.${ext}`;
+    return {
+      id: `xtream_${streamId}`,
+      name: item.name || `Canal ${i + 1}`,
+      logo: item.stream_icon || "",
+      group: catMap.get(String(item.category_id)) || item.category_name || "Xtream",
+      url,
+      streamType: detectStreamType(url),
+      type: "live",
+      xtream: true,
+    };
+  }).filter(c => c.url);
+}
+
+export function isAndroidTVDevice() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const looksLikeTV = /Android/i.test(ua) && /TV|AFT|BRAVIA|SHIELD|Nexus Player|Mi Box|ADT-3/i.test(ua);
+  const wideScreen = typeof window !== "undefined" ? window.innerWidth >= 1200 : false;
+  return looksLikeTV || wideScreen;
+}
+
 // ─── STREMIO ADDON ENGINE ─────────────────────────────────────────────────────
 // Stremio addons exponen una API REST JSON:
 //   GET {baseUrl}/manifest.json          → info del addon
@@ -164,7 +204,7 @@ const StreamBadge = ({ type }) => {
 };
 
 // ─── MEDIA CARD ───────────────────────────────────────────────────────────────
-function MediaCard({ item, onClick, accent }) {
+function MediaCard({ item, onClick, accent, selected = false, tvOptimized = false }) {
   const [focused, setFocused] = useState(false);
   // Normalizar campos de Stremio (poster/name) vs demo (poster/title)
   const title   = item.name || item.title || "Sin título";
@@ -175,17 +215,33 @@ function MediaCard({ item, onClick, accent }) {
   const platform = item.platform || "";
 
   return (
-    <div tabIndex={0} style={{ flexShrink:0, width:160, cursor:"pointer", borderRadius:10, overflow:"hidden", transition:"transform .2s, box-shadow .2s", transform:focused?"scale(1.07)":"scale(1)", boxShadow:focused?`0 0 0 2px ${accent}, 0 8px 24px rgba(0,0,0,.6)`:"none", outline:"none", background:"#10101a" }}
+    <div
+      tabIndex={0}
+      style={{
+        flexShrink:0,
+        width: tvOptimized ? 190 : 160,
+        cursor:"pointer",
+        borderRadius:10,
+        overflow:"hidden",
+        transition:"transform .2s, box-shadow .2s, border-color .2s",
+        transform:(focused || selected) ? "scale(1.08)" : "scale(1)",
+        boxShadow:(focused || selected) ? `0 0 0 2px ${accent}, 0 10px 28px rgba(0,0,0,.65)` : "none",
+        outline:"none",
+        background:"#10101a",
+        border:`1px solid ${(focused || selected) ? accent : "#1e1e2e"}`,
+        position:"relative",
+      }}
       onClick={() => onClick(item)} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-      onKeyDown={e => e.key === "Enter" && onClick(item)}>
+      onKeyDown={e => (e.key === "Enter" || e.key === " ") && onClick(item)}>
       <div style={{ position:"relative", width:"100%", aspectRatio:"2/3", background:"#1a1a2e" }}>
         {poster
           ? <img src={poster} alt={title} style={{ width:"100%", height:"100%", objectFit:"cover" }} onError={e => { e.target.src=`https://placehold.co/200x300/1a1a2e/fff?text=${encodeURIComponent(title)}`; }} />
           : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:40 }}>🎬</div>
         }
-        {focused && <div style={{ position:"absolute", inset:0, background:"rgba(0,0,0,.5)", display:"flex", alignItems:"center", justifyContent:"center" }}><div style={{ width:52, height:52, borderRadius:"50%", background:accent, display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="play" size={24} color="#000" /></div></div>}
+        {(focused || selected) && <div style={{ position:"absolute", inset:0, background:"rgba(0,0,0,.5)", display:"flex", alignItems:"center", justifyContent:"center" }}><div style={{ width:52, height:52, borderRadius:"50%", background:accent, display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="play" size={24} color="#000" /></div></div>}
         {platform && <div style={{ position:"absolute", top:8, left:8, background:PLATFORM_COLORS[platform]||"#333", padding:"2px 7px", borderRadius:4, fontSize:9, fontWeight:700, letterSpacing:1 }}>{platform}</div>}
         {rating && <div style={{ position:"absolute", bottom:8, right:8, background:"rgba(0,0,0,.75)", borderRadius:4, padding:"2px 6px", display:"flex", alignItems:"center", gap:3, fontSize:11 }}><Icon name="star" size={10} color="#F59E0B" />{rating}</div>}
+        {selected && <div style={{ position:"absolute", top:8, right:8, background:accent, color:"#000", borderRadius:999, padding:"2px 8px", fontSize:10, fontWeight:800, letterSpacing:1 }}>SELEC.</div>}
       </div>
       <div style={{ padding:"10px" }}>
         <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{title}</div>
@@ -195,8 +251,54 @@ function MediaCard({ item, onClick, accent }) {
   );
 }
 
+function ChannelTile({ ch, accent, onPlay, selected = false, onSelected, tvOptimized = false }) {
+  const [focused, setFocused] = useState(false);
+  const active = focused || selected;
+
+  return (
+    <div
+      tabIndex={0}
+      style={{
+        display:"flex",
+        alignItems:"center",
+        gap:14,
+        padding: tvOptimized ? 16 : 14,
+        borderRadius:12,
+        background: active ? accent+"12" : "#10101a",
+        border:`1px solid ${active ? accent : "#1e1e2e"}`,
+        cursor:"pointer",
+        outline:"none",
+        transition:"all .2s",
+        transform: active ? "scale(1.02)" : "scale(1)",
+        boxShadow: active ? `0 0 0 2px ${accent}55` : "none",
+        touchAction:"manipulation",
+        WebkitTapHighlightColor:"transparent",
+        userSelect:"none",
+      }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onClick={() => { onSelected?.(ch.id); onPlay(ch); }}
+      onKeyDown={e => (e.key === "Enter" || e.key === " ") && (onSelected?.(ch.id), onPlay(ch))}
+    >
+      <div style={{ width:54, height:40, display:"flex", alignItems:"center", justifyContent:"center", background:"#1a1a2e", borderRadius:8, overflow:"hidden", flexShrink:0, border:`1px solid ${active ? accent+"44" : "transparent"}` }}>
+        {ch.logo ? <img src={ch.logo} style={{ maxWidth:50, maxHeight:36, objectFit:"contain" }} alt="" onError={e => e.target.style.display="none"} /> : <span style={{ fontSize:18 }}>📺</span>}
+      </div>
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:14, fontWeight:700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color: active ? "#fff" : "#ccc" }}>{ch.name}</div>
+        <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:4 }}>
+          <span style={{ fontSize:11, color:"#666" }}>{ch.group}</span>
+          <StreamBadge type={ch.streamType} />
+        </div>
+      </div>
+      <div style={{ width:34, height:34, borderRadius:"50%", background: active ? accent : "#2a2a3e", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+        {selected ? <Icon name="check" size={16} color="#000" /> : <Icon name="play" size={14} color="#000" />}
+      </div>
+    </div>
+  );
+}
+
 // ─── STREMIO CATALOG PAGE ─────────────────────────────────────────────────────
-function StremioCatalogPage({ addons, accent, onSelect }) {
+function StremioCatalogPage({ addons, accent, onSelect, tvOptimized }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
@@ -269,7 +371,7 @@ function StremioCatalogPage({ addons, accent, onSelect }) {
           {!loading && results.length > 0 && (
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(160px,1fr))", gap:20 }}>
               {results.map(item => (
-                <MediaCard key={item.id} item={item} onClick={onSelect} accent={accent} />
+                <MediaCard key={item.id} item={item} onClick={onSelect} accent={accent} tvOptimized={tvOptimized} />
               ))}
             </div>
           )}
@@ -415,6 +517,7 @@ export default function BellaTV() {
   const [channels, setChannels]   = useState([]);
   const [addons, setAddons]       = useState(DEFAULT_ADDONS);
   const [playingCh, setPlayingCh] = useState(null);
+  const [selectedChannelId, setSelectedChannelId] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
   const [showImport, setShowImport] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -481,6 +584,8 @@ export default function BellaTV() {
     { id:"settings",label:"Ajustes",       icon:"settings" },
   ];
 
+  const tvOptimized = isAndroidTVDevice();
+
   const generateEPG = () => {
     const progs = ["Telediario","El Hormiguero","La Ruleta de la Suerte","Noticias 24h","Supervivientes","MasterChef","Cine de acción"];
     const now = new Date(); const r = []; let t = new Date(now); t.setHours(t.getHours()-2,0,0,0);
@@ -489,9 +594,9 @@ export default function BellaTV() {
   };
 
   const Section = ({ title, children }) => (
-    <div style={{ padding:"0 40px 36px" }}>
-      <h2 style={{ fontFamily:"'Bebas Neue',cursive", fontSize:26, letterSpacing:2, color:accent, marginBottom:20 }}>{title}</h2>
-      <div style={{ display:"flex", gap:16, overflowX:"auto", paddingBottom:8, scrollbarWidth:"none" }}>{children}</div>
+    <div style={{ padding: tvOptimized ? "0 32px 40px" : "0 40px 36px" }}>
+      <h2 style={{ fontFamily:"'Bebas Neue',cursive", fontSize: tvOptimized ? 30 : 26, letterSpacing:2, color:accent, marginBottom:20 }}>{title}</h2>
+      <div style={{ display:"flex", gap: tvOptimized ? 18 : 16, overflowX:"auto", paddingBottom:8, scrollbarWidth:"none" }}>{children}</div>
     </div>
   );
 
@@ -576,8 +681,8 @@ export default function BellaTV() {
               </div>
             )}
 
-            <Section title="Películas populares">{MOVIES_DEMO.map(m => <MediaCard key={m.id} item={m} onClick={setSelectedItem} accent={accent} />)}</Section>
-            <Section title="Series recomendadas">{SERIES_DEMO.map(s => <MediaCard key={s.id} item={s} onClick={setSelectedItem} accent={accent} />)}</Section>
+            <Section title="Películas populares">{MOVIES_DEMO.map(m => <MediaCard key={m.id} item={m} onClick={setSelectedItem} accent={accent} selected={selectedItem?.id===m.id} tvOptimized={tvOptimized} />)}</Section>
+            <Section title="Series recomendadas">{SERIES_DEMO.map(s => <MediaCard key={s.id} item={s} onClick={setSelectedItem} accent={accent} selected={selectedItem?.id===s.id} tvOptimized={tvOptimized} />)}</Section>
           </div>
         )}
 
@@ -597,21 +702,17 @@ export default function BellaTV() {
                 <button onClick={() => setShowImport(true)} style={{ padding:"14px 32px", borderRadius:10, background:accent, color:"#000", border:"none", fontWeight:700, fontSize:16, cursor:"pointer" }}>+ Importar Lista</button>
               </div>
             ) : (
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px,1fr))", gap:10 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px,1fr))", gap:12 }}>
                 {channels.map(ch => (
-                  <div key={ch.id} tabIndex={0} style={{ display:"flex", alignItems:"center", gap:14, padding:14, borderRadius:10, background:"#10101a", border:"1px solid #1e1e2e", cursor:"pointer", outline:"none", transition:"all .2s" }}
-                    onClick={() => setPlayingCh(ch)}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor=accent; e.currentTarget.style.background=accent+"10"; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor="#1e1e2e"; e.currentTarget.style.background="#10101a"; }}>
-                    <div style={{ width:52, height:38, display:"flex", alignItems:"center", justifyContent:"center", background:"#1a1a2e", borderRadius:6, overflow:"hidden", flexShrink:0 }}>
-                      {ch.logo ? <img src={ch.logo} style={{ maxWidth:48, maxHeight:34, objectFit:"contain" }} alt="" onError={e => e.target.style.display="none"} /> : <span style={{ fontSize:18 }}>📺</span>}
-                    </div>
-                    <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:14, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
-                      <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:3 }}><span style={{ fontSize:11, color:"#666" }}>{ch.group}</span><StreamBadge type={ch.streamType} /></div>
-                    </div>
-                    <div style={{ width:34, height:34, borderRadius:"50%", background:accent, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}><Icon name="play" size={14} color="#000" /></div>
-                  </div>
+                  <ChannelTile
+                    key={ch.id}
+                    ch={ch}
+                    accent={accent}
+                    tvOptimized={tvOptimized}
+                    selected={selectedChannelId === ch.id || playingCh?.id === ch.id}
+                    onSelected={setSelectedChannelId}
+                    onPlay={setPlayingCh}
+                  />
                 ))}
               </div>
             )}
@@ -623,7 +724,7 @@ export default function BellaTV() {
           <div style={{ padding:"32px 40px" }}>
             <h2 style={{ fontFamily:"'Bebas Neue',cursive", fontSize:30, letterSpacing:2, color:accent, marginBottom:28 }}>Películas</h2>
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(160px,1fr))", gap:20 }}>
-              {MOVIES_DEMO.map(m => <MediaCard key={m.id} item={m} onClick={setSelectedItem} accent={accent} />)}
+              {MOVIES_DEMO.map(m => <MediaCard key={m.id} item={m} onClick={setSelectedItem} accent={accent} selected={selectedItem?.id===m.id} tvOptimized={tvOptimized} />)}
             </div>
           </div>
         )}
@@ -633,13 +734,13 @@ export default function BellaTV() {
           <div style={{ padding:"32px 40px" }}>
             <h2 style={{ fontFamily:"'Bebas Neue',cursive", fontSize:30, letterSpacing:2, color:accent, marginBottom:28 }}>Series</h2>
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(160px,1fr))", gap:20 }}>
-              {SERIES_DEMO.map(s => <MediaCard key={s.id} item={s} onClick={setSelectedItem} accent={accent} />)}
+              {SERIES_DEMO.map(s => <MediaCard key={s.id} item={s} onClick={setSelectedItem} accent={accent} selected={selectedItem?.id===s.id} tvOptimized={tvOptimized} />)}
             </div>
           </div>
         )}
 
         {/* STREMIO */}
-        {page === "stremio" && <StremioCatalogPage addons={addons} accent={accent} onSelect={setSelectedItem} />}
+        {page === "stremio" && <StremioCatalogPage addons={addons} accent={accent} onSelect={setSelectedItem} tvOptimized={tvOptimized} />}
 
         {/* EPG */}
         {page === "epg" && (

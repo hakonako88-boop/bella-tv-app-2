@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import { fetchXtreamLive } from "../BellaTV";
 
 const StreamBadge = ({ type }) => {
   const cfg = {
@@ -15,10 +16,80 @@ const StreamBadge = ({ type }) => {
 
 export default function ImportModal({ onImport, onClose, accent, parseM3U, fetchM3U, detectStreamType }) {
   const [url, setUrl]         = useState("");
+  const [xtreamServer, setXtreamServer] = useState("");
+  const [xtreamUser, setXtreamUser]     = useState("");
+  const [xtreamPass, setXtreamPass]     = useState("");
   const [loading, setLoading] = useState(false);
+  const [xtreamLoading, setXtreamLoading] = useState(false);
   const [error, setError]     = useState("");
   const [preview, setPreview] = useState(null);
   const fileRef               = useRef();
+
+  const parseLoosePlaylist = (text, fallbackGroup = "Playlist") => {
+    const urls = [...text.matchAll(/https?:\/\/[^\s"'<>\\]+/gi)].map(m => m[0]);
+    return urls.map((url, i) => ({
+      id: `loose_${i}`,
+      name: `Canal ${i + 1}`,
+      logo: "",
+      group: fallbackGroup,
+      url,
+      streamType: detectStreamType(url),
+      type: "live",
+    }));
+  };
+
+  const parsePLS = (text) => {
+    const lines = text.split(/\r?\n/).map(l => l.trim());
+    const items = [];
+    const files = {};
+    const titles = {};
+    for (const line of lines) {
+      const file = line.match(/^File(\d+)=([^]+)$/i);
+      if (file) files[file[1]] = file[2].trim();
+      const title = line.match(/^Title(\d+)=([^]+)$/i);
+      if (title) titles[title[1]] = title[2].trim();
+    }
+    Object.keys(files).sort((a,b)=>Number(a)-Number(b)).forEach((n, i) => {
+      const url = files[n];
+      if (!url) return;
+      items.push({
+        id: `pls_${i}`,
+        name: titles[n] || `Canal ${i + 1}`,
+        logo: "",
+        group: "PLS",
+        url,
+        streamType: detectStreamType(url),
+        type: "live",
+      });
+    });
+    return items;
+  };
+
+  const parseXMLPlaylist = (text, group = "XML") => {
+    try {
+      const doc = new DOMParser().parseFromString(text, "application/xml");
+      const tracks = [...doc.querySelectorAll("track")];
+      if (tracks.length > 0) {
+        return tracks.map((track, i) => {
+          const url = track.querySelector("location")?.textContent?.trim() || track.querySelector("ref")?.getAttribute("href")?.trim() || "";
+          const name = track.querySelector("title")?.textContent?.trim() || track.querySelector("annotation")?.textContent?.trim() || `Canal ${i + 1}`;
+          if (!url) return null;
+          return {
+            id: `xml_${i}`,
+            name,
+            logo: "",
+            group,
+            url,
+            streamType: detectStreamType(url),
+            type: "live",
+          };
+        }).filter(Boolean);
+      }
+      return parseLoosePlaylist(text, group);
+    } catch {
+      return parseLoosePlaylist(text, group);
+    }
+  };
 
   // Cargar desde URL
   const handleURL = async () => {
@@ -33,8 +104,9 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
         setPreview({ channels, source: trimmed });
       } else {
         const text = await fetchM3U(trimmed);
+        const trimmedText = text.trim();
         // Detectar si es JSON (addon Stremio exportado)
-        if (text.trim().startsWith("{") || text.trim().startsWith("[")) {
+        if (trimmedText.startsWith("{") || trimmedText.startsWith("[")) {
           const json = JSON.parse(text);
           const items = Array.isArray(json) ? json : (json.streams || json.metas || json.channels || []);
           const channels = items.map((item, i) => ({
@@ -47,6 +119,14 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
             type:       "live",
           })).filter(c => c.url);
           setPreview({ channels, source: "JSON" });
+        } else if (/^\[playlist\]/i.test(trimmedText)) {
+          const channels = parsePLS(text);
+          if (channels.length === 0) throw new Error("No se encontraron canales en el PLS");
+          setPreview({ channels, source: "PLS" });
+        } else if (trimmedText.startsWith("<") && /<(xspf|smil|asx|wpl|playlist)/i.test(trimmedText)) {
+          const channels = parseXMLPlaylist(text, "XML");
+          if (channels.length === 0) throw new Error("No se encontraron canales en el XML");
+          setPreview({ channels, source: "XML" });
         } else {
           const channels = parseM3U(text);
           if (channels.length === 0) throw new Error("No se encontraron canales en la lista");
@@ -56,6 +136,23 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
     } catch (e) {
       setError(e.message || "Error desconocido al cargar la lista");
     } finally { setLoading(false); }
+  };
+
+  const handleXtream = async () => {
+    const server = xtreamServer.trim();
+    const username = xtreamUser.trim();
+    const password = xtreamPass.trim();
+    if (!server || !username || !password) return;
+    setXtreamLoading(true); setError(""); setPreview(null);
+    try {
+      const channels = await fetchXtreamLive({ server, username, password });
+      if (channels.length === 0) throw new Error("No se encontraron canales en Xtream");
+      setPreview({ channels, source: "Xtream Codes" });
+    } catch (e) {
+      setError(e.message || "Error cargando Xtream");
+    } finally {
+      setXtreamLoading(false);
+    }
   };
 
   // Cargar desde archivo
@@ -87,6 +184,14 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
             type:       "live",
           })).filter(c => c.url);
           if (channels.length === 0) throw new Error("No se encontraron streams en el JSON");
+          setPreview({ channels, source: file.name });
+        } else if (ext === "pls") {
+          const channels = parsePLS(text);
+          if (channels.length === 0) throw new Error("No se encontraron canales en el PLS");
+          setPreview({ channels, source: file.name });
+        } else if (["xspf", "asx", "wpl"].includes(ext)) {
+          const channels = parseXMLPlaylist(text, ext.toUpperCase());
+          if (channels.length === 0) throw new Error(`No se encontraron canales en ${ext.toUpperCase()}`);
           setPreview({ channels, source: file.name });
         } else {
           // M3U / M3U8
@@ -129,6 +234,59 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
           {[
             { label:"M3U/M3U8", color:"#34D399", desc:"HLS · TS" },
             { label:"MPD",      color:"#A78BFA", desc:"MPEG-DASH" },
+            { label:"Xtream",   color:"#EC4899", desc:"Live TV API" },
+            { label:"JSON",     color:"#F59E0B", desc:"Stremio·API" },
+          ].map(f => (
+            <div key={f.label} style={{ padding:"10px 8px", borderRadius:8, background:f.color+"11", border:`1px solid ${f.color}33`, textAlign:"center" }}>
+              <div style={{ color:f.color, fontWeight:700, fontSize:12 }}>{f.label}</div>
+              <div style={{ color:"#666", fontSize:10, marginTop:2 }}>{f.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* XTREAM */}
+        <div style={{ padding:14, borderRadius:10, background:"#0f0f1a", border:"1px solid #22243a", marginBottom:20 }}>
+          <div style={{ fontSize:12, color:"#EC4899", fontWeight:700, letterSpacing:1, textTransform:"uppercase", marginBottom:10 }}>
+            Xtream Codes / IPTV API
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1.2fr 1fr 1fr auto", gap:8 }}>
+            <input
+              value={xtreamServer}
+              onChange={e => setXtreamServer(e.target.value)}
+              placeholder="https://servidor.com"
+              style={{ padding:"12px 14px", borderRadius:8, background:"#1a1a2e", border:"1px solid #2a2a3e", color:"#e0e0e0", fontSize:13, outline:"none" }}
+            />
+            <input
+              value={xtreamUser}
+              onChange={e => setXtreamUser(e.target.value)}
+              placeholder="usuario"
+              style={{ padding:"12px 14px", borderRadius:8, background:"#1a1a2e", border:"1px solid #2a2a3e", color:"#e0e0e0", fontSize:13, outline:"none" }}
+            />
+            <input
+              value={xtreamPass}
+              onChange={e => setXtreamPass(e.target.value)}
+              placeholder="contraseña"
+              type="password"
+              style={{ padding:"12px 14px", borderRadius:8, background:"#1a1a2e", border:"1px solid #2a2a3e", color:"#e0e0e0", fontSize:13, outline:"none" }}
+            />
+            <button
+              onClick={handleXtream}
+              disabled={xtreamLoading || !xtreamServer.trim() || !xtreamUser.trim() || !xtreamPass.trim()}
+              style={{ padding:"12px 16px", borderRadius:8, border:"none", background: !xtreamServer.trim() || !xtreamUser.trim() || !xtreamPass.trim() ? "#2a2a3e" : accent, color: !xtreamServer.trim() || !xtreamUser.trim() || !xtreamPass.trim() ? "#666" : "#000", fontWeight:700, fontSize:13, cursor: !xtreamServer.trim() || !xtreamUser.trim() || !xtreamPass.trim() ? "default" : "pointer", opacity: xtreamLoading ? 0.6 : 1, whiteSpace:"nowrap" }}
+            >
+              {xtreamLoading ? "⏳" : "Cargar Xtream"}
+            </button>
+          </div>
+          <div style={{ fontSize:11, color:"#666", marginTop:8 }}>
+            Importa canales live desde servidores compatibles con OTT Navigator / Xtream Codes.
+          </div>
+        </div>
+
+        {/* FORMATS */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:28 }}>
+          {[
+            { label:"M3U/M3U8", color:"#34D399", desc:"HLS · TS" },
+            { label:"MPD",      color:"#A78BFA", desc:"MPEG-DASH" },
             { label:"JSON",     color:"#F59E0B", desc:"Stremio·API" },
             { label:"Archivo",  color:"#60A5FA", desc:"Local" },
           ].map(f => (
@@ -161,11 +319,11 @@ export default function ImportModal({ onImport, onClose, accent, parseM3U, fetch
         </div>
 
         {/* FILE */}
-        <input ref={fileRef} type="file" accept=".m3u,.m3u8,.mpd,.json" style={{ display:"none" }} onChange={handleFile} />
-        <button onClick={() => fileRef.current.click()} style={{ width:"100%", padding:16, borderRadius:8, background:"#1a1a2e", border:`1px dashed #3a3a5e`, color:"#888", fontSize:14, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10, transition:"all .2s" }}
+          <input ref={fileRef} type="file" accept=".m3u,.m3u8,.mpd,.json,.xspf,.pls,.wpl,.asx" style={{ display:"none" }} onChange={handleFile} />
+          <button onClick={() => fileRef.current.click()} style={{ width:"100%", padding:16, borderRadius:8, background:"#1a1a2e", border:`1px dashed #3a3a5e`, color:"#888", fontSize:14, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10, transition:"all .2s" }}
           onMouseEnter={e => e.currentTarget.style.borderColor=accent}
           onMouseLeave={e => e.currentTarget.style.borderColor="#3a3a5e"}>
-          📁 Seleccionar archivo M3U · M3U8 · MPD · JSON
+          📁 Seleccionar archivo M3U · M3U8 · MPD · JSON · XSPF · PLS · WPL · ASX
         </button>
 
         {/* ERROR */}
