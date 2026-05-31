@@ -55,6 +55,13 @@ export default function Player({ channel, onClose, accent }) {
     hideCtrl();
   };
 
+  const shouldUseNativeHls = () => {
+    const ua = navigator.userAgent || "";
+    const isAppleDevice = /iPad|iPhone|iPod/i.test(ua);
+    const isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS|OPiOS/i.test(ua);
+    return isAppleDevice && isSafari;
+  };
+
   // ── Carga y destrucción del stream ──────────────────────────────────────────
   useEffect(() => {
     const vid = videoRef.current;
@@ -74,9 +81,33 @@ export default function Player({ channel, onClose, accent }) {
     const type = channel.streamType || detectStreamType(channel.url);
 
     const initHLS = (Hls) => {
-      if (vid.canPlayType("application/vnd.apple.mpegurl")) {
+      const useNative = shouldUseNativeHls() && vid.canPlayType("application/vnd.apple.mpegurl");
+
+      if (useNative) {
+        // En Android WebView el HLS "nativo" suele fallar aunque el navegador
+        // diga que lo soporta. Solo lo usamos en Safari/iOS real.
         vid.src = channel.url;
-        vid.play().catch(() => setStatus("Error HLS nativo"));
+        vid.load();
+        vid.play()
+          .then(() => { setStatus(""); setPlaying(true); })
+          .catch(() => {
+            if (Hls.isSupported()) {
+              const hls = new Hls({ debug: false, enableWorker: true });
+              hls.loadSource(channel.url);
+              hls.attachMedia(vid);
+              hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                vid.play()
+                  .then(() => { setStatus(""); setPlaying(true); })
+                  .catch(() => setStatus("Autoplay bloqueado — pulsa ▶"));
+              });
+              hls.on(Hls.Events.ERROR, (_, d) => {
+                if (d.fatal) setStatus("Error HLS: " + d.details);
+              });
+              hlsRef.current = hls;
+            } else {
+              setStatus("Error HLS nativo");
+            }
+          });
       } else if (Hls.isSupported()) {
         const hls = new Hls({ debug: false, enableWorker: true });
         hls.loadSource(channel.url);
